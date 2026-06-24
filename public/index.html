@@ -659,6 +659,8 @@ let fxRun=false,fxP=[],fxR=null,twT=null;
 const API_URL = '/api/data';
 let _cloudSynced = false;
 let _saveTimer = null;
+let _syncPromise = null;   // promise yang bisa di-await siapapun yang butuh data fresh
+let _musicArmed = false;   // true kalau user sudah berinteraksi (klik) sebelum sync selesai
 
 // Load: cache lokal dulu (instan), lalu fetch dari cloud (update kalau ada data baru)
 function loadD(){
@@ -669,23 +671,35 @@ function loadD(){
 }
 
 // Ambil data terbaru dari Cloudflare KV (dipanggil saat halaman dibuka)
-async function syncFromCloud(){
-  try{
-    const res = await fetch(API_URL, { cache:'no-store' });
-    if(!res.ok) throw new Error('fetch failed');
-    const json = await res.json();
-    if(json && json.data){
-      D = merge(JSON.parse(JSON.stringify(DEF)), json.data);
-      try{ localStorage.setItem('blv5', JSON.stringify(D)); }catch(e){}
-      applyTheme();
+// Mengembalikan promise yang sama jika dipanggil berkali-kali (supaya tidak fetch ganda)
+function syncFromCloud(force){
+  if(_syncPromise && !force) return _syncPromise;
+  _syncPromise = (async ()=>{
+    try{
+      const res = await fetch(API_URL, { cache:'no-store' });
+      if(!res.ok) throw new Error('fetch failed');
+      const json = await res.json();
+      if(json && json.data){
+        D = merge(JSON.parse(JSON.stringify(DEF)), json.data);
+        try{ localStorage.setItem('blv5', JSON.stringify(D)); }catch(e){}
+        applyTheme();
+      }
       _cloudSynced = true;
-      // Jika sedang di welcome/halaman lain, refresh tampilan teks yang sudah dirender
       refreshCurrentScreenTexts();
+      // Kalau user sudah klik sebelumnya (musicArmed) tapi musik belum mulai, mulai sekarang
+      // dengan data yang sudah pasti ter-update dari cloud
+      if(_musicArmed && !musicOn){
+        startM();
+      }
+    }catch(e){
+      console.warn('Sinkronisasi cloud gagal, pakai data lokal:', e.message);
+      _cloudSynced = true; // anggap selesai (gagal) supaya musik tetap bisa jalan pakai data lokal
+      if(_musicArmed && !musicOn){
+        startM();
+      }
     }
-  }catch(e){
-    // Offline / API belum ter-setup -> diam2 pakai data lokal/default
-    console.warn('Sinkronisasi cloud gagal, pakai data lokal:', e.message);
-  }
+  })();
+  return _syncPromise;
 }
 
 // Simpan ke localStorage (instan) + Cloudflare KV (untuk semua orang)
@@ -925,7 +939,7 @@ async function admLogin(){
   const pw=$('admPw').value,ok=(D.st&&D.st.pw)||'love2024';
   if(pw===ok){
     $('admLogin').style.display='none';$('admDash').style.display='block';
-    await syncFromCloud(); // pastikan admin liat data terbaru sebelum edit
+    await syncFromCloud(true); // force fetch terbaru, jangan pakai cache promise lama
     admLoad();
   }else{
     $('admErr').textContent='Password salah!';$('admPw').value='';
@@ -984,12 +998,21 @@ function doPrev(s){admClose();setTimeout(()=>go(s||1),350);}
 
 window.addEventListener('load',function(){
   loadD();applyTheme();iBg();
-  syncFromCloud(); // ambil data terbaru dari Cloudflare KV (async, tidak blocking)
+  syncFromCloud(); // mulai fetch dari Cloudflare KV sedini mungkin (async, tidak blocking render)
   if(location.hash==='#admin')admOpen();
   window.addEventListener('hashchange',()=>{if(location.hash==='#admin')admOpen();});
   window.addEventListener('keydown',e=>{if(e.ctrlKey&&e.shiftKey&&e.key==='A')admOpen();});
   window.addEventListener('resize',()=>{['cvFx','cvAurora'].forEach(id=>{const c=$(id);if(c){c.width=innerWidth;c.height=innerHeight;}});});
-  document.addEventListener('click',()=>{if(!musicOn&&(!D.st||D.st.mu!==false))startM();},{once:true});
+  document.addEventListener('click',()=>{
+    if(musicOn) return;
+    _musicArmed = true;
+    if(_cloudSynced){
+      // Sync sudah selesai (berhasil/gagal) -> data D sudah final, aman langsung start
+      if(!D.st||D.st.mu!==false) startM();
+    }
+    // Jika belum selesai sync, startM() akan dipanggil otomatis oleh syncFromCloud()
+    // begitu fetch selesai (lihat _musicArmed check di dalam syncFromCloud)
+  },{once:true});
   if(D.id&&D.id.namaP)$('pageTitle').textContent='Happy Birthday '+D.id.namaP+' 💕';
   startLoad();
 });
